@@ -23,8 +23,9 @@ Modes:
   `pfs_image.dat`.
 
 Helper toolbox: `ps5-ffpfsc`.
-Useful commands: `scan`, `status`, `preflight <app-folder>`, `build <app-folder>`,
-`build-batch <folder>`, `history`, `inspect <file>`, `compat <title-or-path>`,
+Useful commands: `scan`, `status`, `doctor`, `updates`, `preflight <app-folder>`,
+`build <app-folder>`, `build-batch <folder>`, `history`, `inspect <file>`,
+`verify <file>`, `compat <title-or-path>`,
 `compat-submit <title> <status> [notes]`, `apr-check <app-folder>`,
 `ampr-index <app-folder>`, `copy <title-or-file>`, `ssd`, `ssd-rm <title...>`,
 `clean-ssd`, `extract <archive>`.
@@ -32,6 +33,8 @@ Useful commands: `scan`, `status`, `preflight <app-folder>`, `build <app-folder>
 ## Steps — do these in order
 
 ### 1. Check the tools for updates
+- First run `ps5-ffpfsc doctor` so missing local dependencies, bad paths, or an
+  unmounted SSD are obvious before a multi-hour job.
 - mkpfs (the packer): compare installed vs latest.
   ```bash
   $PS5_ROOT/.venv/bin/python -m mkpfs -V
@@ -47,6 +50,7 @@ Useful commands: `scan`, `status`, `preflight <app-folder>`, `build <app-folder>
   WebFetch https://github.com/drakmor/ShadowMountPlus/releases . Mention if there's
   a new SMP release the user may want on the console, but it doesn't affect packing.
 - Also glance at MkPFS upstream for relevant changes: https://github.com/PSBrew/MkPFS
+  The shortcut is `ps5-ffpfsc updates`.
 
 ### 2. Ask which game
 - Default dumps live under `$HOME/Downloads/ps5/dumps/`, but the connected
@@ -96,6 +100,9 @@ Useful commands: `scan`, `status`, `preflight <app-folder>`, `build <app-folder>
   - legacy: `mkpfs tree` must show `pfs_image.dat`.
   Relay the final `.ffpfsc` size vs source/wrapped size.
   Check `ps5-ffpfsc history` for the recorded build.
+- For a full integrity check of a local or copied file, run
+  `ps5-ffpfsc verify "<file.ffpfsc>"`. This can be slow on huge games, so ask
+  before doing it after a copy.
 - Remind the copy step (exFAT drive, shell `cp`, then `sync`):
   ```bash
   cp "$PS5_OUT/PPSAxxxxx.ffpfsc" /media/<you>/<drive>/homebrew/ && sync

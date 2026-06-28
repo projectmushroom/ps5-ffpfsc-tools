@@ -14,9 +14,8 @@
 #                         legacy = two-pass pfs_image.dat->.ffpfsc.
 #
 # Stops on any failure and NEVER deletes artifacts on error.
-set -u
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_ROOT="${PS5_ROOT:-$HOME/ps5}"
 PY="${PS5_PY:-$DEFAULT_ROOT/.venv/bin/python}"
 DAT_DIR="${PS5_SCRATCH:-$DEFAULT_ROOT/scratch}"
@@ -31,13 +30,34 @@ MODE="${4:-auto}"
 SRC="${SRC%/}"                                   # strip trailing slash
 BASE="$(basename "$SRC")"
 TITLE="${BASE%-app}"                             # PPSAxxxxx-app -> PPSAxxxxx
-CPU="$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))"     # leave 2 threads for the box
+
+cpu_count() {
+  local total
+  if [ -n "${PS5_CPU_COUNT:-}" ]; then
+    echo "$PS5_CPU_COUNT"
+    return
+  fi
+  if command -v nproc >/dev/null 2>&1; then
+    total="$(nproc)"
+  elif command -v sysctl >/dev/null 2>&1; then
+    total="$(sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+  else
+    total=2
+  fi
+  [ "$total" -gt 2 ] && echo "$((total - 2))" || echo 1
+}
+
+free_kb_for() {
+  df -Pk "$1" | awk 'NR==2 {print $4}'
+}
+
+CPU="$(cpu_count)"                               # leave 2 threads for the box
 
 mkdir -p "$DAT_DIR" "$OUT_DIR" "$LOG_DIR"
 DAT="$DAT_DIR/pfs_image.dat"                      # inner name MUST be exactly this
 FFP="$OUT_DIR/$TITLE.ffpfsc"
 
-report() { tr '\r' '\n' < "$1" | grep -iE 'Files:|Warnings:|Errors:|ratio' | tail -n 6; }
+report() { tr '\r' '\n' < "$1" | grep -iE 'Files:|Warnings:|Errors:|ratio' | tail -n 6 || true; }
 die()    { echo "!!! $* — keeping artifacts for inspection"; echo "=== ABORT ==="; exit 1; }
 has_mkpfs_arg() { "$PY" -m mkpfs "$1" "$2" --help 2>&1 | grep -q -- "$3"; }
 record_history() {
@@ -81,6 +101,7 @@ with open(hist, "a", encoding="utf-8") as f:
 PY
 }
 
+[ -x "$PY" ] || die "python not found or not executable: $PY"
 MKPFS_VER="$("$PY" -m mkpfs -V 2>/dev/null | awk '{print $2}')"
 case "$MODE" in
   auto)
@@ -105,7 +126,7 @@ echo "cruft cleaned"
 
 # pre-flight: disk check — need ~3x source free (src + dat + ffpfsc coexist)
 SRC_KB=$(du -sk "$SRC" | cut -f1)
-FREE_KB=$(df -k --output=avail "$DAT_DIR" | tail -1 | tr -d ' ')
+FREE_KB=$(free_kb_for "$DAT_DIR")
 echo "source=$((SRC_KB/1024/1024))G  free=$((FREE_KB/1024/1024))G  need~$((SRC_KB*2/1024/1024))G more"
 [ "$FREE_KB" -gt "$((SRC_KB*2))" ] || die "not enough free space (need ~2x source beyond the source itself)"
 
@@ -132,6 +153,11 @@ if [ "$MODE" = "fused" ]; then
     "$TITLE.exfat"|pfs_image.dat) ;;
     *) die "unexpected inner layout [$INNER]" ;;
   esac
+
+  echo "=== STEP 3: verify .ffpfsc ==="
+  "$PY" -m mkpfs verify "$FFP" > "$LOG_DIR/3_fused_verifyffp.log" 2>&1 \
+      || die "fused container verify FAILED"
+  report "$LOG_DIR/3_fused_verifyffp.log"
 
   echo "=== SMP-READY: fused build complete; tree layout OK ==="
   record_history "$INNER"
@@ -165,7 +191,8 @@ report "$LOG_DIR/2_verifydat.log"
 #    --compression-level L    low = fast; AAA gains ~0% regardless
 echo "=== STEP 3: pack file (--use-spool --cpu-count $CPU --compression-level $LEVEL) ==="
 "$PY" -m mkpfs pack file --no-rename-inner-image --use-spool --cpu-count "$CPU" \
-    --compression-level "$LEVEL" "${BLOCK_ARGS[@]}" --temp-folder "$DAT_DIR" "$DAT" "$FFP" > "$LOG_DIR/3_packfile.log" 2>&1
+    --compression-level "$LEVEL" "${BLOCK_ARGS[@]}" --temp-folder "$DAT_DIR" "$DAT" "$FFP" > "$LOG_DIR/3_packfile.log" 2>&1 \
+    || die "outer pack file FAILED"
 report "$LOG_DIR/3_packfile.log"
 
 # 4. verify container integrity

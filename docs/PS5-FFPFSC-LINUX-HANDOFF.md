@@ -56,12 +56,17 @@ ps5-ffpfsc scan
 `ps5-ffpfsc` is the "no GUI, Codex is the UI" toolbox:
 - `scan` — find app folders/images/archives under local Downloads and `/mnt/mac`.
 - `status` / `ssd` — show outputs, mounted SSD contents, and space.
+- `doctor` — check dependencies, MkPFS, scratch/output paths, optional tools, and
+  SSD mount state.
+- `updates` — check installed/latest MkPFS, ShadowMountPlus releases, and MkPFS
+  upstream activity.
 - `preflight <PPSAxxxxx-app>` — source/disk/SSD math + APR/AMPR + compatibility.
 - `build <PPSAxxxxx-app> [level] [mode]` — default front door: preflight, AMPR
   index refresh if possible, build, fused→legacy fallback, history recording.
 - `build-batch <folder> [level] [mode]` — process discovered `*-app` folders.
 - `history` — recent build/copy records.
 - `inspect <file.ffpfsc>` — size + `mkpfs tree`.
+- `verify <file.ffpfsc>` — full `mkpfs verify` + `tree` for local or copied files.
 - `compat <title-or-path>` — query the public PS5-FFPFSC-PRO compatibility DB.
 - `compat-submit <title> <status> [notes]` — submit only after on-console testing.
 - `apr-check <PPSAxxxxx-app>` — check PlayGo/APR/AMPR markers before packing.
@@ -136,7 +141,7 @@ rm -f "$DAT" "$FFP"
 
 # 3. wrap the inner image into the compressed container (keep the exact inner name)
 #    --use-spool + --cpu-count + low --compression-level = use the WHOLE cpu (see Performance below)
-CPU=$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))
+CPU="${PS5_CPU_COUNT:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
 "$PY" -m mkpfs pack file --no-rename-inner-image --use-spool --cpu-count "$CPU" \
     --compression-level 1 --temp-folder "$DAT_DIR" "$DAT" "$FFP"
 
@@ -167,6 +172,8 @@ pack_ffpfsc.sh "<PPSAxxxxx-app folder>" [compression_level] [block_size] [mode]
 Preferred higher-level command:
 
 ```bash
+ps5-ffpfsc doctor
+ps5-ffpfsc updates
 ps5-ffpfsc build "<PPSAxxxxx-app folder>" 1 auto
 ```
 
@@ -274,6 +281,10 @@ pack_ffpfsc.sh "<PPSAxxxxx-app>" 1 auto legacy
 Compatibility DB reads are fine before building. `compat-submit` is for after
 on-console testing only.
 
+Run `ps5-ffpfsc doctor` when a path, mount, Python environment, or optional tool
+looks suspicious. It is cheap and catches the boring stuff before the expensive
+packing starts.
+
 ## Validation = the readiness gate
 
 A container is SMP-ready ONLY if **both** pass:
@@ -342,8 +353,9 @@ rm -rf "$TMP"
   driver silently drops large files copied via Finder. We had to use
   `cp -X <file> /Volumes/<drive>/homebrew/ && sync` from Terminal. If you ever copy
   from the Mac instead, that's the workaround.
-- After copying, sanity-check on the drive: `mkpfs verify` + `mkpfs tree` the copied
-  file to be sure it transferred intact and still shows inner `pfs_image.dat`.
+- After copying, the helper performs a fast byte-count check. For a full integrity
+  check on the drive, run `ps5-ffpfsc verify "/mnt/drive/homebrew/PPSAxxxxx.ffpfsc"`
+  and expect it to take a while on huge games.
 
 ---
 
@@ -367,10 +379,11 @@ start, then `mkpfs tree` to confirm before you copy anything to the console.
 
 1. `pip install mkpfs` in a venv.
 2. Clean cruft, check you have ~3× the game's size free on a big volume.
-3. `rm -f` stale targets, then: pack folder (`--no-compress`, inner file named
+3. `ps5-ffpfsc doctor`, then `ps5-ffpfsc updates` if starting a new session.
+4. `rm -f` stale targets, then: pack folder (`--no-compress`, inner file named
    `pfs_image.dat`) → verify → pack file (`--no-rename-inner-image` **+ `--use-spool
    --cpu-count $(nproc-2) --compression-level 1`** so it uses the whole CPU) → verify.
-4. `mkpfs tree` MUST show `pfs_image.dat`. If it doesn't, it won't mount — fix it.
-5. `cp` to the drive's `homebrew/` folder, `sync`, eject cleanly.
+5. `mkpfs tree` MUST show `pfs_image.dat`. If it doesn't, it won't mount — fix it.
+6. `cp` to the drive's `homebrew/` folder, `sync`, eject cleanly.
 
 Or just run `pack_ffpfsc.sh "<...-app>"` (or the `/ps5-ffpfsc` skill).

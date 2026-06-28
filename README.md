@@ -3,10 +3,10 @@
 Small Linux/macOS helper repo for turning legal PS5 `PPSAxxxxx-app/` game dump
 folders into ShadowMountPlus-ready `.ffpfsc` containers with MkPFS.
 
-This is the repeatable version of the workflow: update checks, source scanning,
-preflight disk math, APR/AMPR checks, community compatibility lookup, MkPFS
-packing, build history, SSD copy helpers, and a Codex skill so the assistant can
-act as the UI.
+This is the repeatable version of the workflow: local diagnostics, update checks,
+source scanning, preflight disk math, APR/AMPR checks, community compatibility
+lookup, MkPFS packing, build history, SSD copy helpers, and a Codex skill so the
+assistant can act as the UI.
 
 Only use this with game dumps you legally own and are allowed to handle.
 
@@ -37,6 +37,8 @@ cp config.example.env .env
 ## Common Flow
 
 ```bash
+ps5-ffpfsc doctor
+ps5-ffpfsc updates
 ps5-ffpfsc scan
 ps5-ffpfsc preflight "/path/to/PPSAxxxxx-app"
 ps5-ffpfsc build "/path/to/PPSAxxxxx-app" 1 auto
@@ -54,7 +56,10 @@ first and falls back to the legacy two-pass path if needed.
 ```text
 scan
 status
+doctor
+updates
 inspect <file.ffpfsc>
+verify <file.ffpfsc>
 compat <title-or-path>
 compat-submit <title> <status> [notes]
 apr-check <PPSAxxxxx-app-folder>
@@ -76,6 +81,7 @@ extract <archive>
 - `skills/ps5-ffpfsc/SKILL.md` is the assistant workflow trigger.
 - `bin/pack_ffpfsc.sh` is the lower-level verified packer.
 - `bin/ps5-ffpfsc` is the front-door toolbox.
+- `scripts/check.sh` runs syntax checks and ShellCheck when available.
 
 ## Credits
 
