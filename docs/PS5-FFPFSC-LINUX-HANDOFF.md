@@ -67,14 +67,24 @@ ps5-ffpfsc scan
   index refresh if possible, build, fused→legacy fallback, history recording.
 - `build-batch <folder> [level] [mode]` — process discovered `*-app` folders.
 - `history` — recent build/copy records.
+- `history --json` / `history --title PPSAxxxxx` — machine-readable or filtered
+  local history.
 - `inspect <file.ffpfsc>` — size + `mkpfs tree`.
 - `verify <file.ffpfsc>` — full `mkpfs verify` + `tree` for local or copied files.
 - `compat <title-or-path>` — query the public PS5-FFPFSC-PRO compatibility DB.
+- `compat-cache [refresh|path|clear]` — manage a one-day local compatibility cache.
 - `compat-submit <title> <status> [notes]` — submit only after on-console testing.
 - `apr-check <PPSAxxxxx-app>` — check PlayGo/APR/AMPR markers before packing.
 - `ampr-index <PPSAxxxxx-app>` — build `ampr_emu.index` only when the two AMPR
   SPRX files already exist.
-- `copy <PPSAxxxxx|file>` — copy local output to `/mnt/drive/homebrew` and `sync`.
+- `copy [--rsync] <PPSAxxxxx|file>` — copy local output to `/mnt/drive/homebrew`
+  and `sync`; `--rsync` enables resumable progress copies.
+- `copied <PPSAxxxxx> [--full-verify]` — confirm SSD copy exists and byte-matches
+  local output; full verify is optional and slow.
+- `clean-local <PPSAxxxxx> [--yes]` — dry-run title-specific local cleanup; add
+  `--yes` to delete listed local output/log/scratch files.
+- `runbook <title-or-app> [output.md]` — write a Markdown build/copy report.
+- `bench` — quick scratch write/read and CPU/MkPFS summary.
 - `ssd-rm <title...>` — delete only from the SSD homebrew folder.
 - `clean-ssd` — remove AppleDouble/metadata cruft from SSD homebrew.
 - `extract <archive>` — extract `.zip/.rar/.7z` to scratch and print found `*-app`

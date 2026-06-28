@@ -14,6 +14,8 @@ SCAN_ROOTS="${PS5_SCAN_ROOTS:-$HOME/Downloads /mnt/mac/Downloads}"
 COMMUNITY_URL="${PS5_COMMUNITY_URL:-https://script.google.com/macros/s/AKfycbzPAg4-N2RFBel9oRfyxdBhCH4OylrkpHrOBfPcn31CV1l4PMRaKEwDWztdrDH2p4pM/exec}"
 PACK_SCRIPT="${PS5_PACK_SCRIPT:-$SCRIPT_DIR/pack_ffpfsc.sh}"
 PLAN_COMPAT="${PS5_PLAN_COMPAT:-1}"
+COMPAT_CACHE="${PS5_COMPAT_CACHE:-$ROOT/cache/compat.json}"
+COMPAT_CACHE_TTL="${PS5_COMPAT_CACHE_TTL:-86400}"
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -29,6 +31,32 @@ file_bytes() {
   else
     stat -f %z "$1"
   fi
+}
+
+file_mtime() {
+  if stat -c %Y "$1" >/dev/null 2>&1; then
+    stat -c %Y "$1"
+  else
+    stat -f %m "$1"
+  fi
+}
+
+now_epoch() {
+  date +%s
+}
+
+human_bytes() {
+  python3 - "$1" <<'PY'
+import sys
+n = int(sys.argv[1] or 0)
+units = ["B", "KiB", "MiB", "GiB", "TiB"]
+v = float(n)
+for unit in units:
+    if v < 1024 or unit == units[-1]:
+        print(f"{v:.1f} {unit}" if unit != "B" else f"{int(v)} {unit}")
+        break
+    v /= 1024
+PY
 }
 
 is_mounted() {
@@ -55,6 +83,7 @@ Commands:
 
   doctor
       Check local dependencies, paths, MkPFS, optional tools, and mounts.
+      Use doctor --fix to create local directories and print setup hints.
 
   updates
       Check installed/latest MkPFS and latest ShadowMountPlus release.
@@ -67,6 +96,9 @@ Commands:
 
   compat <title-or-path>
       Query the public PS5-FFPFSC-PRO community compatibility DB.
+
+  compat-cache [refresh|path|clear]
+      Manage the local compatibility DB cache used by compat/plan/preflight.
 
   apr-check <PPSAxxxxx-app-folder>
       Check for APR/AMPR indicators: playgo-chunk.dat, fakelib SPRX files,
@@ -92,6 +124,7 @@ Commands:
 
   history
       Show recent local build/copy history.
+      Supports --json and --title PPSAxxxxx.
 
   compat-submit <title> <status> [notes]
       Submit a tested result to the public compatibility DB. Use only after
@@ -99,7 +132,20 @@ Commands:
 
   copy <title-or-file>
       Copy a local .ffpfsc to /mnt/drive/homebrew, sync, and byte-check.
+      Supports --rsync for resumable progress when rsync is installed.
       Examples: copy PPSA01317, copy /path/game.ffpfsc
+
+  copied <title> [--full-verify]
+      Check whether the SSD copy exists and matches local output by byte size.
+
+  clean-local <title> [--yes]
+      Dry-run local output/log/scratch cleanup for one title. Add --yes to delete.
+
+  runbook <title-or-app> [output.md]
+      Generate a Markdown report for a title/app and recent local history.
+
+  bench
+      Quick local scratch disk write/read and CPU/MkPFS summary.
 
   ssd
       Show SSD /mnt/drive/homebrew contents and free space.
@@ -221,6 +267,11 @@ status() {
 }
 
 doctor() {
+  local fix=0
+  if [ "${1:-}" = "--fix" ]; then
+    fix=1
+    shift
+  fi
   echo "=== required ==="
   printf "bash:   "; bash --version | head -1
   printf "python: "
@@ -247,6 +298,9 @@ doctor() {
   echo
   echo "=== paths ==="
   mkdir -p "$SCRATCH" "$OUT" "$ROOT/logs"
+  if [ "$fix" -eq 1 ]; then
+    mkdir -p "$ROOT" "$ROOT/cache" "$SCRATCH" "$OUT" "$ROOT/logs" "$(dirname "$HISTORY")"
+  fi
   echo "root:    $ROOT"
   echo "scratch: $SCRATCH ($(df -h "$SCRATCH" | tail -1))"
   echo "out:     $OUT ($(df -h "$OUT" | tail -1))"
@@ -258,6 +312,14 @@ doctor() {
     [ -d "$SSD_HOME" ] && echo "homebrew: $SSD_HOME" || echo "homebrew missing: $SSD_HOME"
   else
     echo "not mounted: $SSD"
+  fi
+  if [ "$fix" -eq 1 ]; then
+    echo
+    echo "=== fix hints ==="
+    [ -x "$PY" ] || echo "create venv: python3 -m venv \"$ROOT/.venv\" && \"$ROOT/.venv/bin/pip\" install -U mkpfs"
+    command_exists 7z || echo "install 7z: use your distro package for p7zip/7zip"
+    command_exists gh || echo "install gh: use GitHub CLI if you want update/PR helpers"
+    echo "ensure PATH includes: $HOME/.local/bin"
   fi
 }
 
@@ -304,18 +366,70 @@ verify_container() {
   "$PY" -m mkpfs tree "$file"
 }
 
+compat_source() {
+  local refresh="${1:-0}"
+  local age=999999999
+  if [ -f "$COMPAT_CACHE" ]; then
+    age="$(( $(now_epoch) - $(file_mtime "$COMPAT_CACHE") ))"
+  fi
+  if [ "$refresh" -eq 0 ] && [ -f "$COMPAT_CACHE" ] && [ "$age" -lt "$COMPAT_CACHE_TTL" ]; then
+    echo "$COMPAT_CACHE"
+  else
+    echo "$COMMUNITY_URL"
+  fi
+}
+
+compat_cache() {
+  local action="${1:-refresh}"
+  case "$action" in
+    path)
+      echo "$COMPAT_CACHE"
+      ;;
+    clear)
+      rm -f "$COMPAT_CACHE"
+      echo "cleared $COMPAT_CACHE"
+      ;;
+    refresh)
+      mkdir -p "$(dirname "$COMPAT_CACHE")"
+      python3 - "$COMMUNITY_URL" "$COMPAT_CACHE" <<'PY'
+import json, os, sys, urllib.request
+url, path = sys.argv[1:]
+with urllib.request.urlopen(url, timeout=30) as r:
+    data = json.load(r)
+with open(path + ".tmp", "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+os.replace(path + ".tmp", path)
+print(f"cached {data.get('count', '?')} entries at {path}")
+PY
+      ;;
+    *)
+      echo "usage: ps5-ffpfsc compat-cache [refresh|path|clear]" >&2
+      exit 1
+      ;;
+  esac
+}
+
 compat_lookup() {
   local query="${1:?compat needs title or path}"
   local title
   title="$(title_from_arg "$query" | tr '[:lower:]' '[:upper:]')"
   [ -n "$title" ] || { echo "could not resolve title id from: $query" >&2; exit 1; }
-  python3 - "$title" <<'PY'
-import json, sys, urllib.request
+  local source
+  source="$(compat_source 0)"
+  python3 - "$title" "$source" <<'PY'
+import json, os, sys, urllib.request
 title=sys.argv[1].upper()
-url="https://script.google.com/macros/s/AKfycbzPAg4-N2RFBel9oRfyxdBhCH4OylrkpHrOBfPcn31CV1l4PMRaKEwDWztdrDH2p4pM/exec"
+source=sys.argv[2]
 try:
-    with urllib.request.urlopen(url, timeout=25) as r:
-        data=json.load(r)
+    if os.path.isfile(source):
+        with open(source, encoding="utf-8") as f:
+            data=json.load(f)
+        print(f"compat source: cache {source}")
+    else:
+        with urllib.request.urlopen(source, timeout=25) as r:
+            data=json.load(r)
+        print("compat source: network")
 except Exception as e:
     print(f"compat lookup failed: {e}")
     raise SystemExit(1)
@@ -553,19 +667,33 @@ plan_build() {
 }
 
 history_list() {
+  local json=0 title_filter=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      --title) title_filter="${2:?--title needs PPSAxxxxx}"; shift 2 ;;
+      *) echo "unknown history option: $1" >&2; exit 1 ;;
+    esac
+  done
   if [ ! -f "$HISTORY" ]; then
     echo "no history yet: $HISTORY"
     return
   fi
-  python3 - "$HISTORY" <<'PY'
+  python3 - "$HISTORY" "$json" "$title_filter" <<'PY'
 import json, sys
 from pathlib import Path
+hist, emit_json, title_filter = sys.argv[1], sys.argv[2] == "1", sys.argv[3].upper()
 rows=[]
-for line in Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines():
+for line in Path(hist).read_text(encoding="utf-8", errors="replace").splitlines():
     try:
         rows.append(json.loads(line))
     except Exception:
         pass
+if title_filter:
+    rows=[r for r in rows if str(r.get("title") or r.get("file") or "").upper()==title_filter]
+if emit_json:
+    print(json.dumps(rows, ensure_ascii=False, indent=2))
+    raise SystemExit(0)
 for r in rows[-30:]:
     title=r.get("title") or r.get("file") or "?"
     event=r.get("event","?")
@@ -599,6 +727,11 @@ PY
 
 copy_to_ssd() {
   require_ssd
+  local use_rsync=0
+  if [ "${1:-}" = "--rsync" ]; then
+    use_rsync=1
+    shift
+  fi
   local src="${1:?copy needs PPSA title or file path}"
   if [[ "$src" != /* ]]; then
     src="$OUT/${src%.ffpfsc}.ffpfsc"
@@ -607,7 +740,12 @@ copy_to_ssd() {
   local dst
   dst="$SSD_HOME/$(basename "$src")"
   echo "copying $(du -h "$src" | cut -f1) $(basename "$src") -> $dst"
-  cp "$src" "$dst"
+  if [ "$use_rsync" -eq 1 ]; then
+    command_exists rsync || { echo "rsync requested but not installed" >&2; exit 1; }
+    rsync --partial --inplace --info=progress2 "$src" "$dst"
+  else
+    cp "$src" "$dst"
+  fi
   sync
   local src_bytes dst_bytes
   src_bytes="$(file_bytes "$src")"
@@ -618,6 +756,138 @@ copy_to_ssd() {
   echo "byte check: OK"
   record_copy_history "$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')" "$src" "$dst"
   df -h "$SSD" | tail -1
+}
+
+copied_status() {
+  local full_verify=0
+  local title=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --full-verify) full_verify=1; shift ;;
+      *) title="$1"; shift ;;
+    esac
+  done
+  [ -n "$title" ] || { echo "copied needs PPSA title" >&2; exit 1; }
+  title="$(title_from_arg "$title" | tr '[:lower:]' '[:upper:]')"
+  local local_file="$OUT/${title}.ffpfsc"
+  local dst="$SSD_HOME/${title}.ffpfsc"
+  echo "=== copied: $title ==="
+  if [ -f "$local_file" ]; then
+    echo "local: $local_file ($(human_bytes "$(file_bytes "$local_file")"))"
+  else
+    echo "local: missing $local_file"
+  fi
+  if [ -f "$dst" ]; then
+    echo "ssd:   $dst ($(human_bytes "$(file_bytes "$dst")"))"
+  else
+    echo "ssd:   missing $dst"
+    return 1
+  fi
+  if [ -f "$local_file" ]; then
+    local lb db
+    lb="$(file_bytes "$local_file")"
+    db="$(file_bytes "$dst")"
+    if [ "$lb" = "$db" ]; then
+      echo "byte check: OK"
+    else
+      echo "byte check: mismatch local=$lb ssd=$db" >&2
+      return 1
+    fi
+  fi
+  if [ "$full_verify" -eq 1 ]; then
+    verify_container "$dst"
+  fi
+}
+
+clean_local() {
+  local yes=0 title=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --yes) yes=1; shift ;;
+      *) title="$1"; shift ;;
+    esac
+  done
+  [ -n "$title" ] || { echo "clean-local needs PPSA title" >&2; exit 1; }
+  title="$(title_from_arg "$title" | tr '[:lower:]' '[:upper:]')"
+  [[ "$title" =~ ^(PPSA|CUSA)[0-9]{5}$ ]] || { echo "refusing unsafe title: $title" >&2; exit 1; }
+  local paths=()
+  [ -f "$OUT/${title}.ffpfsc" ] && paths+=("$OUT/${title}.ffpfsc")
+  while IFS= read -r p; do paths+=("$p"); done < <(find "$ROOT/logs" -maxdepth 1 -type f -name "*${title}*" 2>/dev/null | sort)
+  while IFS= read -r p; do paths+=("$p"); done < <(find "$SCRATCH" -maxdepth 1 \( -name "*${title}*" -o -name "extract-*${title}*" \) 2>/dev/null | sort)
+  echo "=== clean-local: $title ==="
+  if [ "${#paths[@]}" -eq 0 ]; then
+    echo "nothing found"
+    return
+  fi
+  if [ "$yes" -eq 0 ]; then
+    echo "dry-run; add --yes to delete:"
+    printf '  %s\n' "${paths[@]}"
+    return
+  fi
+  printf 'deleting %s\n' "${paths[@]}"
+  rm -rf -- "${paths[@]}"
+}
+
+runbook() {
+  local query="${1:?runbook needs title or app path}"
+  local output="${2:-}"
+  local title src=""
+  title="$(title_from_arg "$query" | tr '[:lower:]' '[:upper:]')"
+  [ -d "$query" ] && src="$query"
+  [ -n "$output" ] || output="$ROOT/runbooks/${title:-runbook}_$(date +%Y%m%d_%H%M%S).md"
+  mkdir -p "$(dirname "$output")"
+  python3 - "$HISTORY" "$title" "$src" "$OUT/${title}.ffpfsc" "$SSD_HOME/${title}.ffpfsc" "$output" <<'PY'
+import json, os, sys, time
+hist, title, src, local_file, ssd_file, output = sys.argv[1:]
+rows=[]
+if os.path.exists(hist):
+    for line in open(hist, encoding="utf-8", errors="replace"):
+        try:
+            row=json.loads(line)
+        except Exception:
+            continue
+        if not title or str(row.get("title","")).upper()==title:
+            rows.append(row)
+def size(path):
+    return os.path.getsize(path) if os.path.exists(path) else None
+def human(n):
+    if n is None:
+        return "missing"
+    v=float(n)
+    for u in ["B","KiB","MiB","GiB","TiB"]:
+        if v < 1024 or u=="TiB":
+            return f"{v:.1f} {u}" if u!="B" else f"{int(v)} {u}"
+        v/=1024
+with open(output, "w", encoding="utf-8") as f:
+    f.write(f"# PS5 FFPFSC Runbook: {title or 'unknown'}\n\n")
+    f.write(f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    f.write(f"- Source: {src or 'unknown'}\n")
+    f.write(f"- Local output: {local_file} ({human(size(local_file))})\n")
+    f.write(f"- SSD output: {ssd_file} ({human(size(ssd_file))})\n\n")
+    f.write("## Recent History\n\n")
+    if not rows:
+        f.write("No matching history rows.\n")
+    else:
+        for row in rows[-20:]:
+            f.write(f"- {row.get('ts','')} `{row.get('event','?')}` mode={row.get('mode','-')} layout={row.get('layout','-')} output={row.get('output') or row.get('dst') or '-'}\n")
+print(output)
+PY
+}
+
+bench() {
+  mkdir -p "$SCRATCH"
+  local file="$SCRATCH/.ps5-ffpfsc-bench.$$"
+  local mb="${PS5_BENCH_MB:-256}"
+  echo "=== bench ==="
+  echo "cpu threads: $(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
+  echo "mkpfs: $(mkpfs_version || true)"
+  echo "scratch: $SCRATCH"
+  echo "write ${mb}MiB:"
+  dd if=/dev/zero of="$file" bs=1048576 count="$mb"
+  sync
+  echo "read ${mb}MiB:"
+  dd if="$file" of=/dev/null bs=1048576
+  rm -f "$file"
 }
 
 ssd_status() {
@@ -742,6 +1012,7 @@ case "$cmd" in
   inspect) inspect_container "$@" ;;
   verify) verify_container "$@" ;;
   compat) compat_lookup "$@" ;;
+  compat-cache) compat_cache "$@" ;;
   compat-submit) compat_submit "$@" ;;
   apr-check) apr_check "$@" ;;
   ampr-index) ampr_index "$@" ;;
@@ -751,6 +1022,10 @@ case "$cmd" in
   build-batch) build_batch "$@" ;;
   history) history_list "$@" ;;
   copy) copy_to_ssd "$@" ;;
+  copied) copied_status "$@" ;;
+  clean-local) clean_local "$@" ;;
+  runbook) runbook "$@" ;;
+  bench) bench "$@" ;;
   ssd) ssd_status "$@" ;;
   ssd-rm) ssd_rm "$@" ;;
   clean-ssd) clean_ssd "$@" ;;

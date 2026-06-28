@@ -20,6 +20,7 @@ export PS5_SCAN_ROOTS="$TMP/input"
 export PS5_SSD="$TMP/ssd"
 export PS5_SSD_HOME="$TMP/ssd/homebrew"
 export PS5_PLAN_COMPAT=0
+export PS5_BENCH_MB=1
 
 TOOL="$ROOT/bin/ps5-ffpfsc"
 
@@ -49,5 +50,45 @@ assert_contains "$TMP/plan.out" "ps5-ffpfsc copy PPSA99999"
 "$TOOL" doctor > "$TMP/doctor.out"
 assert_contains "$TMP/doctor.out" "root:    $TMP/root"
 assert_contains "$TMP/doctor.out" "not mounted: $TMP/ssd"
+
+"$TOOL" doctor --fix > "$TMP/doctor-fix.out"
+assert_contains "$TMP/doctor-fix.out" "fix hints"
+
+printf 'ffpfsc fixture\n' > "$TMP/out/PPSA99999.ffpfsc"
+cp "$TMP/out/PPSA99999.ffpfsc" "$TMP/ssd/homebrew/PPSA99999.ffpfsc"
+"$TOOL" copied PPSA99999 > "$TMP/copied.out"
+assert_contains "$TMP/copied.out" "=== copied: PPSA99999 ==="
+assert_contains "$TMP/copied.out" "byte check: OK"
+
+mkdir -p "$TMP/root/logs"
+printf 'log\n' > "$TMP/root/logs/build_PPSA99999_fixture.log"
+printf 'scratch\n' > "$TMP/scratch/PPSA99999.tmp"
+"$TOOL" clean-local PPSA99999 > "$TMP/clean-dry.out"
+assert_contains "$TMP/clean-dry.out" "dry-run; add --yes to delete"
+assert_contains "$TMP/clean-dry.out" "$TMP/out/PPSA99999.ffpfsc"
+"$TOOL" clean-local PPSA99999 --yes > "$TMP/clean-yes.out"
+assert_contains "$TMP/clean-yes.out" "deleting"
+[ ! -f "$TMP/out/PPSA99999.ffpfsc" ] || { echo "clean-local did not delete local output" >&2; exit 1; }
+
+cat > "$TMP/root/history.jsonl" <<EOF
+{"ts":"2026-01-01 00:00:00","event":"build","title":"PPSA99999","mode":"auto","layout":"PPSA99999.exfat","output":"$TMP/out/PPSA99999.ffpfsc","output_bytes":15}
+{"ts":"2026-01-01 00:01:00","event":"copy","title":"PPSA99999","dst":"$TMP/ssd/homebrew/PPSA99999.ffpfsc","bytes":15}
+EOF
+"$TOOL" history --title PPSA99999 > "$TMP/history.out"
+assert_contains "$TMP/history.out" "PPSA99999"
+"$TOOL" history --title PPSA99999 --json > "$TMP/history.json"
+assert_contains "$TMP/history.json" '"title": "PPSA99999"'
+
+"$TOOL" runbook PPSA99999 "$TMP/runbook.md" > "$TMP/runbook.out"
+assert_contains "$TMP/runbook.out" "$TMP/runbook.md"
+assert_contains "$TMP/runbook.md" "# PS5 FFPFSC Runbook: PPSA99999"
+
+"$TOOL" compat-cache path > "$TMP/compat-path.out"
+assert_contains "$TMP/compat-path.out" "$TMP/root/cache/compat.json"
+"$TOOL" compat-cache clear > "$TMP/compat-clear.out"
+assert_contains "$TMP/compat-clear.out" "cleared"
+
+"$TOOL" bench > "$TMP/bench.out" 2>&1
+assert_contains "$TMP/bench.out" "=== bench ==="
 
 echo "fixture tests passed"
