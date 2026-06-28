@@ -24,8 +24,8 @@ Modes:
 
 Helper toolbox: `ps5-ffpfsc`.
 Useful commands: `scan`, `status`, `doctor`, `updates`, `preflight <app-folder>`,
-`plan <app-folder>`, `build <app-folder>`, `build-batch <folder>`, `history`,
-`inspect <file>`, `verify <file>`, `compat <title-or-path>`,
+`profile <app-folder>`, `plan <app-folder>`, `build <app-folder>`,
+`build-batch <folder>`, `history`, `inspect <file>`, `verify <file>`, `compat <title-or-path>`,
 `compat-cache [refresh|path|clear]`, `compat-submit <title> <status> [notes]`,
 `apr-check <app-folder>`, `ampr-index <app-folder>`, `copy [--rsync] <title-or-file>`,
 `copied <title> [--full-verify]`, `clean-local <title> [--yes]`,
@@ -62,11 +62,13 @@ Useful commands: `scan`, `status`, `doctor`, `updates`, `preflight <app-folder>`
   `ps5-ffpfsc scan`.
 - Ask the user which one (or to paste a path). Confirm the resolved title
   (`PPSAxxxxx` from the folder name) and show source size + free disk.
-- Before building, run the dry-run plan:
+- Before building, run the advisor and dry-run plan:
   ```bash
+  ps5-ffpfsc profile "<SRC-app-folder>"
   ps5-ffpfsc plan "<SRC-app-folder>"
   ```
-  This includes output/scratch paths, disk math, APR/AMPR detection,
+  `profile` recommends `fast`, `balanced`, `small`, or `legacy-safe` from the
+  file mix. `plan` includes output/scratch paths, disk math, APR/AMPR detection,
   compatibility lookup, and exact build/copy commands without changing files.
 - If you need the older verbose report, run:
   ```bash
@@ -83,6 +85,9 @@ Useful commands: `scan`, `status`, `doctor`, `updates`, `preflight <app-folder>`
   (GT7: 283.68 GB wrapped input → 173.55 GB final, 38.82% gain).
   Offer higher levels only if the user wants max compression and accepts longer
   runtimes.
+- Use the profile recommendation when it is clear. `small` is intentionally slower:
+  level 7 plus `auto-fit` blocks. Use it for smaller/raw-ish dumps, not giant
+  pre-compressed AAA dumps unless the user accepts the time.
 - Prefer the build tool build front door. It runs preflight, refreshes AMPR index
   when possible, builds, falls back from fused to legacy if needed, and records
   history:
