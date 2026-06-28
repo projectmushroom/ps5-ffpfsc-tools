@@ -40,7 +40,7 @@ cp config.example.env .env
 ps5-ffpfsc doctor
 ps5-ffpfsc updates
 ps5-ffpfsc scan
-ps5-ffpfsc preflight "/path/to/PPSAxxxxx-app"
+ps5-ffpfsc plan "/path/to/PPSAxxxxx-app"
 ps5-ffpfsc build "/path/to/PPSAxxxxx-app" 1 auto
 ps5-ffpfsc inspect "$HOME/Downloads/ps5/out/PPSAxxxxx.ffpfsc"
 ps5-ffpfsc copy PPSAxxxxx
@@ -50,6 +50,10 @@ ps5-ffpfsc copy PPSAxxxxx
 refreshes `ampr_emu.index` only when the required SPRX files already exist, then
 packs with MkPFS. On MkPFS `0.0.9+`, `auto` uses the fused exFAT-wrapped path
 first and falls back to the legacy two-pass path if needed.
+
+`plan` is the dry-run front door. It prints the resolved title, output path,
+scratch path, disk math, APR/AMPR state, compatibility lookup, and exact build/copy
+commands without changing files.
 
 ## Commands
 
@@ -65,6 +69,7 @@ compat-submit <title> <status> [notes]
 apr-check <PPSAxxxxx-app-folder>
 ampr-index <PPSAxxxxx-app-folder>
 preflight <PPSAxxxxx-app-folder>
+plan <PPSAxxxxx-app-folder> [level] [mode]
 build <PPSAxxxxx-app-folder> [level] [mode]
 build-batch <folder> [level] [mode]
 history
@@ -82,6 +87,7 @@ extract <archive>
 - `bin/pack_ffpfsc.sh` is the lower-level verified packer.
 - `bin/ps5-ffpfsc` is the front-door toolbox.
 - `scripts/check.sh` runs syntax checks and ShellCheck when available.
+- `tests/run.sh` creates a tiny fake app fixture and checks scan/plan/doctor.
 
 ## Credits
 

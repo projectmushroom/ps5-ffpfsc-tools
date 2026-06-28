@@ -24,8 +24,8 @@ Modes:
 
 Helper toolbox: `ps5-ffpfsc`.
 Useful commands: `scan`, `status`, `doctor`, `updates`, `preflight <app-folder>`,
-`build <app-folder>`, `build-batch <folder>`, `history`, `inspect <file>`,
-`verify <file>`, `compat <title-or-path>`,
+`plan <app-folder>`, `build <app-folder>`, `build-batch <folder>`, `history`,
+`inspect <file>`, `verify <file>`, `compat <title-or-path>`,
 `compat-submit <title> <status> [notes]`, `apr-check <app-folder>`,
 `ampr-index <app-folder>`, `copy <title-or-file>`, `ssd`, `ssd-rm <title...>`,
 `clean-ssd`, `extract <archive>`.
@@ -60,11 +60,16 @@ Useful commands: `scan`, `status`, `doctor`, `updates`, `preflight <app-folder>`
   `ps5-ffpfsc scan`.
 - Ask the user which one (or to paste a path). Confirm the resolved title
   (`PPSAxxxxx` from the folder name) and show source size + free disk.
-- Before building, run:
+- Before building, run the dry-run plan:
+  ```bash
+  ps5-ffpfsc plan "<SRC-app-folder>"
+  ```
+  This includes output/scratch paths, disk math, APR/AMPR detection,
+  compatibility lookup, and exact build/copy commands without changing files.
+- If you need the older verbose report, run:
   ```bash
   ps5-ffpfsc preflight "<SRC-app-folder>"
   ```
-  This includes APR/AMPR detection and compatibility lookup.
   `ampr-index` can build `ampr_emu.index` only when required SPRX files already
   exist in `fakelib/`. Do not invent AMPR files. The actual AMPR
   emulator SPRX files are not bundled in PS5-FFPFSC-PRO and must already exist in

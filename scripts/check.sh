@@ -7,7 +7,9 @@ cd "$ROOT"
 bash -n install.sh bin/ps5-ffpfsc bin/pack_ffpfsc.sh
 
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck install.sh bin/ps5-ffpfsc bin/pack_ffpfsc.sh
+  shellcheck install.sh bin/ps5-ffpfsc bin/pack_ffpfsc.sh scripts/check.sh tests/run.sh
 else
   echo "shellcheck not found; skipped"
 fi
+
+./tests/run.sh

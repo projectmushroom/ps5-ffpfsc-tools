@@ -61,6 +61,8 @@ ps5-ffpfsc scan
 - `updates` — check installed/latest MkPFS, ShadowMountPlus releases, and MkPFS
   upstream activity.
 - `preflight <PPSAxxxxx-app>` — source/disk/SSD math + APR/AMPR + compatibility.
+- `plan <PPSAxxxxx-app> [level] [mode]` — dry-run build plan with resolved title,
+  paths, disk math, APR/AMPR, compatibility, and exact build/copy commands.
 - `build <PPSAxxxxx-app> [level] [mode]` — default front door: preflight, AMPR
   index refresh if possible, build, fused→legacy fallback, history recording.
 - `build-batch <folder> [level] [mode]` — process discovered `*-app` folders.
@@ -174,6 +176,7 @@ Preferred higher-level command:
 ```bash
 ps5-ffpfsc doctor
 ps5-ffpfsc updates
+ps5-ffpfsc plan "<PPSAxxxxx-app folder>" 1 auto
 ps5-ffpfsc build "<PPSAxxxxx-app folder>" 1 auto
 ```
 
@@ -270,7 +273,7 @@ pack_ffpfsc.sh "<PPSAxxxxx-app>" 1 auto legacy
    **~3× source total**. Point `--temp-folder` and `$DAT` at the big volume.
 3. **Check APR/AMPR and compatibility before packing:**
    ```bash
-   ps5-ffpfsc preflight "$SRC"
+   ps5-ffpfsc plan "$SRC"
    ```
    PS5-FFPFSC-PRO's AMPR detection/index code is public, but the actual
    `libSceAmpr.sprx` and `libScePlayGo.sprx` files are **not** bundled. If a game
