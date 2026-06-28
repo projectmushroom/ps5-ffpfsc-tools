@@ -13,6 +13,7 @@ HISTORY="${PS5_HISTORY:-$ROOT/history.jsonl}"
 SCAN_ROOTS="${PS5_SCAN_ROOTS:-$HOME/Downloads /mnt/mac/Downloads}"
 COMMUNITY_URL="${PS5_COMMUNITY_URL:-https://script.google.com/macros/s/AKfycbzPAg4-N2RFBel9oRfyxdBhCH4OylrkpHrOBfPcn31CV1l4PMRaKEwDWztdrDH2p4pM/exec}"
 PACK_SCRIPT="${PS5_PACK_SCRIPT:-$SCRIPT_DIR/pack_ffpfsc.sh}"
+PLAN_COMPAT="${PS5_PLAN_COMPAT:-1}"
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -77,6 +78,10 @@ Commands:
   preflight <PPSAxxxxx-app-folder>
       Show source size, disk/SSD space, APR/AMPR state, compatibility report,
       and recommended build mode.
+
+  plan <PPSAxxxxx-app-folder> [level] [mode]
+      Print the resolved title, paths, disk math, APR/AMPR state, compatibility
+      lookup, and exact build/copy commands without changing files.
 
   build <PPSAxxxxx-app-folder> [level] [mode]
       Run preflight, build AMPR index when possible, run pack_ffpfsc, and
@@ -155,6 +160,41 @@ PY
     return
   fi
   echo "$x"
+}
+
+mkpfs_version() {
+  if [ -x "$PY" ]; then
+    "$PY" -m mkpfs -V 2>/dev/null | awk '{print $2}'
+  fi
+}
+
+resolved_mode() {
+  local mode="${1:-auto}"
+  local version="${2:-}"
+  case "$mode" in
+    auto)
+      case "$version" in
+        0.0.9|0.0.1[0-9]*|0.[1-9]*|[1-9]*) echo "fused" ;;
+        "") echo "unknown" ;;
+        *) echo "legacy" ;;
+      esac
+      ;;
+    fused|legacy) echo "$mode" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+quote_cmd() {
+  local first=1
+  local arg
+  for arg in "$@"; do
+    if [ "$first" -eq 0 ]; then
+      printf ' '
+    fi
+    printf '%q' "$arg"
+    first=0
+  done
+  printf '\n'
 }
 
 status() {
@@ -466,6 +506,52 @@ preflight() {
   echo "recommendation: mode=auto level=1 (MkPFS 0.0.9 fused first; fallback legacy if needed)"
 }
 
+plan_build() {
+  local src="${1:?plan needs app folder}"
+  local level="${2:-1}"
+  local mode="${3:-auto}"
+  [ -d "$src" ] || { echo "not a folder: $src" >&2; exit 1; }
+  mkdir -p "$SCRATCH" "$OUT"
+
+  local title src_kb free_kb version effective output
+  title="$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')"
+  src_kb="$(du -sk "$src" | cut -f1)"
+  free_kb="$(free_kb_for "$SCRATCH")"
+  version="$(mkpfs_version)"
+  effective="$(resolved_mode "$mode" "$version")"
+  output="$OUT/${title:-UNKNOWN}.ffpfsc"
+
+  echo "=== plan: ${title:-unknown} ==="
+  echo "source: $src"
+  echo "output: $output"
+  echo "scratch: $SCRATCH"
+  echo "source size: $((src_kb/1024/1024))G ($src_kb KiB)"
+  echo "local free:  $((free_kb/1024/1024))G ($free_kb KiB)"
+  echo "legacy peak extra need: ~$((src_kb*2/1024/1024))G"
+  echo "compression level: $level"
+  echo "requested mode: $mode"
+  echo "mkpfs version: ${version:-unavailable}"
+  echo "effective mode: $effective"
+  if [ "$mode" = "auto" ] && [ "$effective" = "unknown" ]; then
+    echo "mode note: install MkPFS before build so auto can choose fused vs legacy"
+  elif [ "$mode" = "auto" ]; then
+    echo "mode note: auto will try $effective first"
+  fi
+  echo
+  apr_check "$src" || true
+  echo
+  if [ "$PLAN_COMPAT" = "1" ]; then
+    compat_lookup "${title:-$src}" || true
+  else
+    echo "compat: skipped (PS5_PLAN_COMPAT=0)"
+  fi
+  echo
+  echo "build command:"
+  quote_cmd ps5-ffpfsc build "$src" "$level" "$mode"
+  echo "copy command:"
+  quote_cmd ps5-ffpfsc copy "${title:-$output}"
+}
+
 history_list() {
   if [ ! -f "$HISTORY" ]; then
     echo "no history yet: $HISTORY"
@@ -660,6 +746,7 @@ case "$cmd" in
   apr-check) apr_check "$@" ;;
   ampr-index) ampr_index "$@" ;;
   preflight) preflight "$@" ;;
+  plan) plan_build "$@" ;;
   build) build_one "$@" ;;
   build-batch) build_batch "$@" ;;
   history) history_list "$@" ;;
