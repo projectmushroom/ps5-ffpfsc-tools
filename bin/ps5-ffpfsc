@@ -14,6 +14,33 @@ SCAN_ROOTS="${PS5_SCAN_ROOTS:-$HOME/Downloads /mnt/mac/Downloads}"
 COMMUNITY_URL="${PS5_COMMUNITY_URL:-https://script.google.com/macros/s/AKfycbzPAg4-N2RFBel9oRfyxdBhCH4OylrkpHrOBfPcn31CV1l4PMRaKEwDWztdrDH2p4pM/exec}"
 PACK_SCRIPT="${PS5_PACK_SCRIPT:-$SCRIPT_DIR/pack_ffpfsc.sh}"
 
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+free_kb_for() {
+  df -Pk "$1" | awk 'NR==2 {print $4}'
+}
+
+file_bytes() {
+  if stat -c %s "$1" >/dev/null 2>&1; then
+    stat -c %s "$1"
+  else
+    stat -f %z "$1"
+  fi
+}
+
+is_mounted() {
+  local path="$1"
+  if command_exists mountpoint; then
+    mountpoint -q "$path"
+  elif command_exists findmnt; then
+    findmnt "$path" >/dev/null 2>&1
+  else
+    [ -d "$path" ] && df -P "$path" >/dev/null 2>&1
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage: ps5-ffpfsc <command> [args]
@@ -25,8 +52,17 @@ Commands:
   status
       Show MkPFS version, local output files, SSD contents, and disk space.
 
+  doctor
+      Check local dependencies, paths, MkPFS, optional tools, and mounts.
+
+  updates
+      Check installed/latest MkPFS and latest ShadowMountPlus release.
+
   inspect <file.ffpfsc>
       Show size and MkPFS tree for a container.
+
+  verify <file.ffpfsc>
+      Run MkPFS verify and tree for a local or copied container.
 
   compat <title-or-path>
       Query the public PS5-FFPFSC-PRO community compatibility DB.
@@ -57,7 +93,7 @@ Commands:
       testing on-console.
 
   copy <title-or-file>
-      Copy a local .ffpfsc to /mnt/drive/homebrew and sync.
+      Copy a local .ffpfsc to /mnt/drive/homebrew, sync, and byte-check.
       Examples: copy PPSA01317, copy /path/game.ffpfsc
 
   ssd
@@ -76,7 +112,7 @@ EOF
 }
 
 require_ssd() {
-  mountpoint -q "$SSD" || {
+  is_mounted "$SSD" || {
     echo "SSD share is not mounted at $SSD. Run: sudo fish ~/mount-drive.fish" >&2
     exit 1
   }
@@ -123,16 +159,20 @@ PY
 
 status() {
   echo "=== MkPFS ==="
-  "$PY" -m mkpfs -V
+  if [ -x "$PY" ]; then
+    "$PY" -m mkpfs -V
+  else
+    echo "missing: $PY"
+  fi
   echo
   echo "=== local output ==="
   ls -lh "$OUT" 2>/dev/null || true
   echo
   echo "=== local disk ==="
-  df -h /home | tail -1
+  df -h "$HOME" | tail -1
   echo
   echo "=== SSD ==="
-  if mountpoint -q "$SSD"; then
+  if is_mounted "$SSD"; then
     df -h "$SSD" | tail -1
     ls -lh "$SSD_HOME" 2>/dev/null || true
   else
@@ -140,10 +180,87 @@ status() {
   fi
 }
 
+doctor() {
+  echo "=== required ==="
+  printf "bash:   "; bash --version | head -1
+  printf "python: "
+  if [ -x "$PY" ]; then
+    "$PY" --version
+  else
+    echo "missing at $PY"
+  fi
+  printf "mkpfs:  "
+  if [ -x "$PY" ] && "$PY" -m mkpfs -V >/dev/null 2>&1; then
+    "$PY" -m mkpfs -V
+  else
+    echo "not available"
+  fi
+  echo
+  echo "=== optional ==="
+  for tool in 7z gh rsync; do
+    if command_exists "$tool"; then
+      echo "$tool: $(command -v "$tool")"
+    else
+      echo "$tool: missing"
+    fi
+  done
+  echo
+  echo "=== paths ==="
+  mkdir -p "$SCRATCH" "$OUT" "$ROOT/logs"
+  echo "root:    $ROOT"
+  echo "scratch: $SCRATCH ($(df -h "$SCRATCH" | tail -1))"
+  echo "out:     $OUT ($(df -h "$OUT" | tail -1))"
+  echo "history: $HISTORY"
+  echo
+  echo "=== SSD ==="
+  if is_mounted "$SSD"; then
+    echo "mounted: $SSD ($(df -h "$SSD" | tail -1))"
+    [ -d "$SSD_HOME" ] && echo "homebrew: $SSD_HOME" || echo "homebrew missing: $SSD_HOME"
+  else
+    echo "not mounted: $SSD"
+  fi
+}
+
+updates() {
+  echo "=== MkPFS ==="
+  if [ -x "$PY" ]; then
+    "$PY" -m mkpfs -V || true
+    "$PY" -m pip index versions mkpfs 2>/dev/null | head -5 || true
+  else
+    echo "missing python venv at $PY"
+  fi
+  echo
+  echo "=== ShadowMountPlus ==="
+  if command_exists gh; then
+    gh release view -R drakmor/ShadowMountPlus --json tagName,name,publishedAt,url \
+      --template '{{.tagName}} {{.publishedAt}}{{"\n"}}{{.url}}{{"\n"}}' 2>/dev/null \
+      || echo "could not read ShadowMountPlus releases"
+  else
+    echo "gh missing; check https://github.com/drakmor/ShadowMountPlus/releases"
+  fi
+  echo
+  echo "=== MkPFS upstream ==="
+  if command_exists gh; then
+    gh repo view PSBrew/MkPFS --json pushedAt,url \
+      --template 'pushed: {{.pushedAt}}{{"\n"}}{{.url}}{{"\n"}}' 2>/dev/null \
+      || echo "could not read MkPFS repo"
+  else
+    echo "gh missing; check https://github.com/PSBrew/MkPFS"
+  fi
+}
+
 inspect_container() {
   local file="${1:?inspect needs a file}"
   [ -f "$file" ] || { echo "not a file: $file" >&2; exit 1; }
   ls -lh "$file"
+  "$PY" -m mkpfs tree "$file"
+}
+
+verify_container() {
+  local file="${1:?verify needs a file}"
+  [ -f "$file" ] || { echo "not a file: $file" >&2; exit 1; }
+  ls -lh "$file"
+  "$PY" -m mkpfs verify "$file"
   "$PY" -m mkpfs tree "$file"
 }
 
@@ -329,13 +446,14 @@ preflight() {
   local title src_kb free_kb
   title="$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')"
   src_kb="$(du -sk "$src" | cut -f1)"
-  free_kb="$(df -k --output=avail "$SCRATCH" | tail -1 | tr -d ' ')"
+  mkdir -p "$SCRATCH"
+  free_kb="$(free_kb_for "$SCRATCH")"
   echo "=== preflight: ${title:-unknown} ==="
   echo "source: $src"
   echo "source size: $((src_kb/1024/1024))G"
   echo "local free:  $((free_kb/1024/1024))G"
   echo "legacy peak extra need: ~$((src_kb*2/1024/1024))G"
-  if mountpoint -q "$SSD"; then
+  if is_mounted "$SSD"; then
     echo "SSD: $(df -h "$SSD" | tail -1)"
   else
     echo "SSD: not mounted"
@@ -400,12 +518,18 @@ copy_to_ssd() {
     src="$OUT/${src%.ffpfsc}.ffpfsc"
   fi
   [ -f "$src" ] || { echo "not found: $src" >&2; exit 1; }
-  local dst="$SSD_HOME/$(basename "$src")"
-  echo "copying $(ls -lh "$src" | awk '{print $5, $9}') -> $dst"
+  local dst
+  dst="$SSD_HOME/$(basename "$src")"
+  echo "copying $(du -h "$src" | cut -f1) $(basename "$src") -> $dst"
   cp "$src" "$dst"
   sync
-  echo "src bytes: $(stat -c %s "$src")"
-  echo "dst bytes: $(stat -c %s "$dst")"
+  local src_bytes dst_bytes
+  src_bytes="$(file_bytes "$src")"
+  dst_bytes="$(file_bytes "$dst")"
+  echo "src bytes: $src_bytes"
+  echo "dst bytes: $dst_bytes"
+  [ "$src_bytes" = "$dst_bytes" ] || { echo "byte mismatch after copy" >&2; exit 1; }
+  echo "byte check: OK"
   record_copy_history "$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')" "$src" "$dst"
   df -h "$SSD" | tail -1
 }
@@ -447,10 +571,13 @@ extract_archive() {
   stem="$(basename "$archive")"
   stem="${stem%.*}"
   local dest="$SCRATCH/extract-$stem"
+  local archive_lc
+  archive_lc="$(printf '%s' "$archive" | tr '[:upper:]' '[:lower:]')"
   rm -rf "$dest"
   mkdir -p "$dest"
-  case "${archive,,}" in
-    *.zip|*.7z|*.rar|*.r00|*.part1.rar)
+  case "$archive_lc" in
+    *.zip|*.7z|*.rar|*.r00)
+      command_exists 7z || { echo "7z is required for archive extraction" >&2; exit 1; }
       7z x -y "-o$dest" "$archive"
       ;;
     *)
@@ -477,7 +604,8 @@ build_one() {
   ampr_index "$src" || true
   echo
   echo "=== pack ==="
-  local log="$ROOT/logs/build_${title:-manual}_$(date +%Y%m%d_%H%M%S).log"
+  local log
+  log="$ROOT/logs/build_${title:-manual}_$(date +%Y%m%d_%H%M%S).log"
   mkdir -p "$ROOT/logs"
   if bash "$PACK_SCRIPT" "$src" "$level" auto "$mode" | tee "$log"; then
     echo "build ok; log=$log"
@@ -523,7 +651,10 @@ shift || true
 case "$cmd" in
   scan) scan "$@" ;;
   status) status "$@" ;;
+  doctor) doctor "$@" ;;
+  updates) updates "$@" ;;
   inspect) inspect_container "$@" ;;
+  verify) verify_container "$@" ;;
   compat) compat_lookup "$@" ;;
   compat-submit) compat_submit "$@" ;;
   apr-check) apr_check "$@" ;;
