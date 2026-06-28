@@ -111,13 +111,18 @@ Commands:
       Show source size, disk/SSD space, APR/AMPR state, compatibility report,
       and recommended build mode.
 
+  profile <PPSAxxxxx-app-folder>
+      Analyze file mix and recommend a preset before building.
+
   plan <PPSAxxxxx-app-folder> [level] [mode]
       Print the resolved title, paths, disk math, APR/AMPR state, compatibility
       lookup, and exact build/copy commands without changing files.
+      Also supports --preset fast|balanced|small|legacy-safe.
 
   build <PPSAxxxxx-app-folder> [level] [mode]
       Run preflight, build AMPR index when possible, run pack_ffpfsc, and
       fallback fused->legacy if the fused build fails.
+      Also supports --preset fast|balanced|small|legacy-safe.
 
   build-batch <folder> [level] [mode]
       Find *-app folders under a folder and build them sequentially.
@@ -241,6 +246,72 @@ quote_cmd() {
     first=0
   done
   printf '\n'
+}
+
+preset_values() {
+  local preset="${1:-balanced}"
+  case "$preset" in
+    fast)
+      echo "1 auto auto"
+      ;;
+    balanced)
+      echo "1 auto auto"
+      ;;
+    small)
+      echo "7 auto-fit auto"
+      ;;
+    legacy-safe)
+      echo "1 auto legacy"
+      ;;
+    *)
+      echo "unknown preset: $preset" >&2
+      return 1
+      ;;
+  esac
+}
+
+parse_build_args() {
+  local level=1 block=auto mode=auto preset=balanced
+  local positional=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --preset)
+        preset="${2:?--preset needs fast|balanced|small|legacy-safe}"
+        local values
+        values="$(preset_values "$preset")" || return 1
+        read -r level block mode <<< "$values"
+        shift 2
+        ;;
+      --level)
+        level="${2:?--level needs value}"
+        preset=custom
+        shift 2
+        ;;
+      --block-size)
+        block="${2:?--block-size needs value}"
+        preset=custom
+        shift 2
+        ;;
+      --mode)
+        mode="${2:?--mode needs auto|fused|legacy}"
+        preset=custom
+        shift 2
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+  done
+  if [ "${#positional[@]}" -ge 1 ]; then
+    level="${positional[0]}"
+    preset=custom
+  fi
+  if [ "${#positional[@]}" -ge 2 ]; then
+    mode="${positional[1]}"
+    preset=custom
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$level" "$block" "$mode" "$preset"
 }
 
 status() {
@@ -620,10 +691,106 @@ preflight() {
   echo "recommendation: mode=auto level=1 (MkPFS 0.0.9 fused first; fallback legacy if needed)"
 }
 
+profile_dump() {
+  local src="${1:?profile needs app folder}"
+  [ -d "$src" ] || { echo "not a folder: $src" >&2; exit 1; }
+  local title
+  title="$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')"
+  python3 - "$src" "$title" <<'PY'
+import os, shlex, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+title = sys.argv[2] or "unknown"
+compressed_ext = {
+    ".7z", ".arc", ".bik", ".bk2", ".bnk", ".cpk", ".dds", ".fsb", ".forge",
+    ".jpg", ".jpeg", ".m4a", ".mkv", ".mp3", ".mp4", ".ogg", ".opus", ".pak",
+    ".png", ".rar", ".usm", ".utoc", ".ucas", ".wem", ".wmv", ".zip", ".zlib",
+}
+rawish_ext = {
+    "", ".bin", ".csv", ".dat", ".ini", ".json", ".lua", ".raw", ".shader",
+    ".txt", ".xml", ".yaml", ".yml",
+}
+exec_ext = {".elf", ".self", ".sprx", ".prx", ".bin"}
+rows = []
+total = small_bytes = compressed_bytes = rawish_bytes = exec_bytes = 0
+small_files = 0
+by_ext = {}
+for dirpath, _, filenames in os.walk(root):
+    for name in filenames:
+        p = Path(dirpath) / name
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        size = st.st_size
+        ext = p.suffix.lower()
+        total += size
+        rows.append((size, ext, p))
+        by_ext[ext] = by_ext.get(ext, 0) + size
+        if size < 65536:
+            small_files += 1
+            small_bytes += size
+        if ext in compressed_ext:
+            compressed_bytes += size
+        if ext in rawish_ext:
+            rawish_bytes += size
+        if ext in exec_ext or name.lower() in {"eboot.bin"}:
+            exec_bytes += size
+
+count = len(rows)
+compressed_ratio = compressed_bytes / total if total else 0
+small_file_ratio = small_files / count if count else 0
+small_byte_ratio = small_bytes / total if total else 0
+rawish_ratio = rawish_bytes / total if total else 0
+
+reasons = []
+if compressed_ratio >= 0.70 and total >= 50 * 1024**3:
+    preset = "fast"
+    reasons.append("large dump dominated by likely pre-compressed assets")
+elif rawish_ratio >= 0.30 or (small_file_ratio >= 0.50 and small_byte_ratio >= 0.02):
+    preset = "small"
+    reasons.append("many raw/small files may benefit from stronger compression and auto-fit blocks")
+elif total < 25 * 1024**3 and compressed_ratio < 0.50:
+    preset = "small"
+    reasons.append("smaller dump with less obvious pre-compressed data")
+else:
+    preset = "balanced"
+    reasons.append("mixed asset profile; default tradeoff is appropriate")
+
+top = sorted(by_ext.items(), key=lambda kv: kv[1], reverse=True)[:10]
+def human(n):
+    v = float(n)
+    for u in ["B","KiB","MiB","GiB","TiB"]:
+        if v < 1024 or u == "TiB":
+            return f"{v:.1f} {u}" if u != "B" else f"{int(v)} {u}"
+        v /= 1024
+def pct(v):
+    return f"{v*100:.1f}%"
+print(f"=== profile: {title} ===")
+print(f"source: {root}")
+print(f"files: {count:,}")
+print(f"total size: {human(total)}")
+print(f"likely pre-compressed bytes: {human(compressed_bytes)} ({pct(compressed_ratio)})")
+print(f"raw-ish bytes: {human(rawish_bytes)} ({pct(rawish_ratio)})")
+print(f"small files: {small_files:,} ({pct(small_file_ratio)} of files, {pct(small_byte_ratio)} of bytes)")
+print(f"executable-ish bytes: {human(exec_bytes)}")
+print("top extensions:")
+for ext, size in top:
+    print(f"  {ext or '[none]'}: {human(size)}")
+print(f"recommended preset: {preset}")
+print("reason: " + "; ".join(reasons))
+print("build command:")
+print(f"ps5-ffpfsc build {shlex.quote(str(root))} --preset {preset}")
+PY
+}
+
 plan_build() {
   local src="${1:?plan needs app folder}"
-  local level="${2:-1}"
-  local mode="${3:-auto}"
+  shift
+  local parsed level block mode preset
+  parsed="$(parse_build_args "$@")"
+  IFS=$'\t' read -r level block mode preset <<< "$parsed"
   [ -d "$src" ] || { echo "not a folder: $src" >&2; exit 1; }
   mkdir -p "$SCRATCH" "$OUT"
 
@@ -642,7 +809,9 @@ plan_build() {
   echo "source size: $((src_kb/1024/1024))G ($src_kb KiB)"
   echo "local free:  $((free_kb/1024/1024))G ($free_kb KiB)"
   echo "legacy peak extra need: ~$((src_kb*2/1024/1024))G"
+  echo "preset: $preset"
   echo "compression level: $level"
+  echo "block size: $block"
   echo "requested mode: $mode"
   echo "mkpfs version: ${version:-unavailable}"
   echo "effective mode: $effective"
@@ -661,7 +830,11 @@ plan_build() {
   fi
   echo
   echo "build command:"
-  quote_cmd ps5-ffpfsc build "$src" "$level" "$mode"
+  if [ "$preset" != "custom" ]; then
+    quote_cmd ps5-ffpfsc build "$src" --preset "$preset"
+  else
+    quote_cmd ps5-ffpfsc build "$src" --level "$level" --block-size "$block" --mode "$mode"
+  fi
   echo "copy command:"
   quote_cmd ps5-ffpfsc copy "${title:-$output}"
 }
@@ -948,8 +1121,10 @@ extract_archive() {
 
 build_one() {
   local src="${1:?build needs app folder}"
-  local level="${2:-1}"
-  local mode="${3:-auto}"
+  shift
+  local parsed level block mode preset
+  parsed="$(parse_build_args "$@")"
+  IFS=$'\t' read -r level block mode preset <<< "$parsed"
   [ -d "$src" ] || { echo "not a folder: $src" >&2; exit 1; }
   local title
   title="$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')"
@@ -963,13 +1138,14 @@ build_one() {
   local log
   log="$ROOT/logs/build_${title:-manual}_$(date +%Y%m%d_%H%M%S).log"
   mkdir -p "$ROOT/logs"
-  if bash "$PACK_SCRIPT" "$src" "$level" auto "$mode" | tee "$log"; then
+  echo "preset=$preset level=$level block=$block mode=$mode"
+  if bash "$PACK_SCRIPT" "$src" "$level" "$block" "$mode" | tee "$log"; then
     echo "build ok; log=$log"
     return 0
   fi
   if [ "$mode" = "auto" ] || [ "$mode" = "fused" ]; then
     echo "fused/auto build failed; retrying legacy two-pass"
-    bash "$PACK_SCRIPT" "$src" "$level" auto legacy | tee -a "$log"
+    bash "$PACK_SCRIPT" "$src" "$level" "$block" legacy | tee -a "$log"
     echo "legacy retry done; log=$log"
   else
     echo "build failed; log=$log" >&2
@@ -1017,6 +1193,7 @@ case "$cmd" in
   apr-check) apr_check "$@" ;;
   ampr-index) ampr_index "$@" ;;
   preflight) preflight "$@" ;;
+  profile) profile_dump "$@" ;;
   plan) plan_build "$@" ;;
   build) build_one "$@" ;;
   build-batch) build_batch "$@" ;;
