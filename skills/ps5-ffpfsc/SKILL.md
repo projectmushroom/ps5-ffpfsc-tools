@@ -26,8 +26,10 @@ Helper toolbox: `ps5-ffpfsc`.
 Useful commands: `scan`, `status`, `doctor`, `updates`, `preflight <app-folder>`,
 `plan <app-folder>`, `build <app-folder>`, `build-batch <folder>`, `history`,
 `inspect <file>`, `verify <file>`, `compat <title-or-path>`,
-`compat-submit <title> <status> [notes]`, `apr-check <app-folder>`,
-`ampr-index <app-folder>`, `copy <title-or-file>`, `ssd`, `ssd-rm <title...>`,
+`compat-cache [refresh|path|clear]`, `compat-submit <title> <status> [notes]`,
+`apr-check <app-folder>`, `ampr-index <app-folder>`, `copy [--rsync] <title-or-file>`,
+`copied <title> [--full-verify]`, `clean-local <title> [--yes]`,
+`runbook <title-or-app> [output.md]`, `bench`, `ssd`, `ssd-rm <title...>`,
 `clean-ssd`, `extract <archive>`.
 
 ## Steps — do these in order
@@ -114,6 +116,12 @@ Useful commands: `scan`, `status`, `doctor`, `updates`, `preflight <app-folder>`
   ```
   If the SSD is mounted at `/mnt/drive`, prefer:
   `ps5-ffpfsc copy PPSAxxxxx`.
+- After copying, run `ps5-ffpfsc copied PPSAxxxxx` for a fast byte-size check.
+  Use `--full-verify` only when the user accepts the wait.
+- Use `ps5-ffpfsc runbook PPSAxxxxx` to write a small Markdown report after a
+  build/copy/test session.
+- Use `ps5-ffpfsc clean-local PPSAxxxxx` to preview reclaimable local files.
+  Only pass `--yes` after confirming the listed paths are safe to remove.
 
 ## Hard rules (from the playbook — do not relearn these)
 1. **Two-pass, never single-pass.** Folder → uncompressed inner, then wrap the file.
