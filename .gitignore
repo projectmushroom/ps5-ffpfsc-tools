@@ -1,0 +1,26 @@
+# Build outputs and scratch data
+*.ffpfsc
+*.exfat
+*.dat
+*.pkg
+*.ffpkg
+*.zip
+*.rar
+*.7z
+scratch/
+logs/
+history.jsonl
+
+# Python/local tool state
+.venv/
+__pycache__/
+*.pyc
+
+# OS/editor cruft
+.DS_Store
+._*
+.Spotlight-V100/
+.fseventsd/
+.Trashes/
+.TemporaryItems/
+.AppleDouble/

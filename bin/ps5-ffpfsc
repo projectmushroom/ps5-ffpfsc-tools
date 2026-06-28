@@ -1,0 +1,542 @@
+#!/usr/bin/env bash
+# Small helper toolbox for the PS5 .ffpfsc workflow on this Linux box.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${PS5_ROOT:-$HOME/ps5}"
+PY="${PS5_PY:-$ROOT/.venv/bin/python}"
+SCRATCH="${PS5_SCRATCH:-$ROOT/scratch}"
+OUT="${PS5_OUT:-$HOME/Downloads/ps5/out}"
+SSD="${PS5_SSD:-/mnt/drive}"
+SSD_HOME="${PS5_SSD_HOME:-$SSD/homebrew}"
+HISTORY="${PS5_HISTORY:-$ROOT/history.jsonl}"
+SCAN_ROOTS="${PS5_SCAN_ROOTS:-$HOME/Downloads /mnt/mac/Downloads}"
+COMMUNITY_URL="${PS5_COMMUNITY_URL:-https://script.google.com/macros/s/AKfycbzPAg4-N2RFBel9oRfyxdBhCH4OylrkpHrOBfPcn31CV1l4PMRaKEwDWztdrDH2p4pM/exec}"
+PACK_SCRIPT="${PS5_PACK_SCRIPT:-$SCRIPT_DIR/pack_ffpfsc.sh}"
+
+usage() {
+  cat <<'EOF'
+Usage: ps5-ffpfsc <command> [args]
+
+Commands:
+  scan
+      Find likely PS5 inputs under local Downloads and the Mac SMB mount.
+
+  status
+      Show MkPFS version, local output files, SSD contents, and disk space.
+
+  inspect <file.ffpfsc>
+      Show size and MkPFS tree for a container.
+
+  compat <title-or-path>
+      Query the public PS5-FFPFSC-PRO community compatibility DB.
+
+  apr-check <PPSAxxxxx-app-folder>
+      Check for APR/AMPR indicators: playgo-chunk.dat, fakelib SPRX files,
+      and ampr_emu.index.
+
+  ampr-index <PPSAxxxxx-app-folder>
+      Build ampr_emu.index if AMPR SPRX files are already present.
+
+  preflight <PPSAxxxxx-app-folder>
+      Show source size, disk/SSD space, APR/AMPR state, compatibility report,
+      and recommended build mode.
+
+  build <PPSAxxxxx-app-folder> [level] [mode]
+      Run preflight, build AMPR index when possible, run pack_ffpfsc, and
+      fallback fused->legacy if the fused build fails.
+
+  build-batch <folder> [level] [mode]
+      Find *-app folders under a folder and build them sequentially.
+
+  history
+      Show recent local build/copy history.
+
+  compat-submit <title> <status> [notes]
+      Submit a tested result to the public compatibility DB. Use only after
+      testing on-console.
+
+  copy <title-or-file>
+      Copy a local .ffpfsc to /mnt/drive/homebrew and sync.
+      Examples: copy PPSA01317, copy /path/game.ffpfsc
+
+  ssd
+      Show SSD /mnt/drive/homebrew contents and free space.
+
+  ssd-rm <title> [title...]
+      Delete title containers from SSD homebrew only.
+      Example: ssd-rm PPSA02015 PPSA01289
+
+  clean-ssd
+      Remove Mac metadata cruft from /mnt/drive/homebrew.
+
+  extract <archive>
+      Extract .zip/.rar/.7z to scratch/extract-<name> and print discovered *-app roots.
+EOF
+}
+
+require_ssd() {
+  mountpoint -q "$SSD" || {
+    echo "SSD share is not mounted at $SSD. Run: sudo fish ~/mount-drive.fish" >&2
+    exit 1
+  }
+  mkdir -p "$SSD_HOME"
+}
+
+scan() {
+  local roots=()
+  local root
+  # shellcheck disable=SC2206
+  roots=($SCAN_ROOTS)
+  for root in "${roots[@]}"; do
+    [ -e "$root" ] || continue
+    find "$root" -maxdepth 5 \
+      \( -type d -name '*-app' -o -type f \( -iname '*.ffpfsc' -o -iname '*.exfat' -o -iname '*.ffpkg' -o -iname '*.zip' -o -iname '*.rar' -o -iname '*.7z' \) \) \
+      2>/dev/null
+  done | sort
+}
+
+title_from_arg() {
+  local x="${1:?title/path required}"
+  local base
+  base="$(basename "$x")"
+  if [[ "$base" =~ (PPSA[0-9]{5}|CUSA[0-9]{5}) ]]; then
+    echo "${BASH_REMATCH[1]}"
+    return
+  fi
+  if [ -d "$x" ] && [ -f "$x/sce_sys/param.json" ]; then
+    python3 - "$x/sce_sys/param.json" <<'PY'
+import json, re, sys
+p=sys.argv[1]
+try:
+    data=json.load(open(p, encoding='utf-8'))
+except Exception:
+    data={}
+text=json.dumps(data)
+m=re.search(r'\b(PPSA\d{5}|CUSA\d{5})\b', text, re.I)
+print(m.group(1).upper() if m else "")
+PY
+    return
+  fi
+  echo "$x"
+}
+
+status() {
+  echo "=== MkPFS ==="
+  "$PY" -m mkpfs -V
+  echo
+  echo "=== local output ==="
+  ls -lh "$OUT" 2>/dev/null || true
+  echo
+  echo "=== local disk ==="
+  df -h /home | tail -1
+  echo
+  echo "=== SSD ==="
+  if mountpoint -q "$SSD"; then
+    df -h "$SSD" | tail -1
+    ls -lh "$SSD_HOME" 2>/dev/null || true
+  else
+    echo "not mounted at $SSD"
+  fi
+}
+
+inspect_container() {
+  local file="${1:?inspect needs a file}"
+  [ -f "$file" ] || { echo "not a file: $file" >&2; exit 1; }
+  ls -lh "$file"
+  "$PY" -m mkpfs tree "$file"
+}
+
+compat_lookup() {
+  local query="${1:?compat needs title or path}"
+  local title
+  title="$(title_from_arg "$query" | tr '[:lower:]' '[:upper:]')"
+  [ -n "$title" ] || { echo "could not resolve title id from: $query" >&2; exit 1; }
+  python3 - "$title" <<'PY'
+import json, sys, urllib.request
+title=sys.argv[1].upper()
+url="https://script.google.com/macros/s/AKfycbzPAg4-N2RFBel9oRfyxdBhCH4OylrkpHrOBfPcn31CV1l4PMRaKEwDWztdrDH2p4pM/exec"
+try:
+    with urllib.request.urlopen(url, timeout=25) as r:
+        data=json.load(r)
+except Exception as e:
+    print(f"compat lookup failed: {e}")
+    raise SystemExit(1)
+hits=[e for e in data.get("entries", []) if str(e.get("title_id","")).upper()==title]
+print(f"compat DB entries: {data.get('count', '?')} total")
+if not hits:
+    print(f"{title}: no community report found")
+    raise SystemExit(0)
+for e in hits:
+    votes=e.get("votes") or {}
+    print(f"{title}: {e.get('game_title') or ''}")
+    print(f"  status: {e.get('status') or 'unknown'}  reports: {e.get('reports') or '?'}")
+    print(f"  votes: working={votes.get('working',0)} partial={votes.get('partial',0)} not_working={votes.get('not_working',0)} not_tested={votes.get('not_tested_yet',0)}")
+    print(f"  original: {e.get('original_size') or '-'}  compressed: {e.get('compressed_size') or '-'}")
+    print(f"  storage: {e.get('storage') or '-'}  shadowmount: {e.get('shadowmount_ver') or '-'}")
+    notes=(e.get("notes") or "").strip()
+    if notes:
+        print(f"  notes: {notes}")
+PY
+}
+
+compat_submit() {
+  local title="${1:?compat-submit needs title}"
+  local status="${2:?compat-submit needs status: Working, Partial, Not Working, or Not Tested Yet}"
+  local notes="${3:-}"
+  title="$(title_from_arg "$title" | tr '[:lower:]' '[:upper:]')"
+  local local_file="$OUT/${title}.ffpfsc"
+  python3 - "$COMMUNITY_URL" "$title" "$status" "$notes" "$local_file" <<'PY'
+import json, os, sys, urllib.request
+url, title, status, notes, local_file = sys.argv[1:]
+valid = {"Working", "Partial", "Not Working", "Not Tested Yet"}
+if status not in valid:
+    raise SystemExit(f"bad status {status!r}; use one of {sorted(valid)}")
+payload = {
+    "title_id": title,
+    "game_title": title,
+    "status": status,
+    "original_size": "",
+    "compressed_size": "",
+    "storage": "USB SSD",
+    "shadowmount_ver": "",
+    "notes": notes,
+}
+if os.path.isfile(local_file):
+    payload["compressed_size"] = f"{os.path.getsize(local_file)/1024**3:.2f} GB"
+data = json.dumps(payload).encode()
+req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+with urllib.request.urlopen(req, timeout=25) as r:
+    print(r.read().decode(errors="replace"))
+PY
+}
+
+apr_check() {
+  local src="${1:?apr-check needs app folder}"
+  [ -d "$src" ] || { echo "not a folder: $src" >&2; exit 1; }
+  local title
+  title="$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')"
+  echo "title: ${title:-unknown}"
+  echo "source: $src"
+  local playgo=0
+  if [ -f "$src/sce_sys/playgo-chunk.dat" ] || [ -f "$src/sce_sys/playgo_chunk.dat" ]; then
+    playgo=1
+  fi
+  echo "playgo chunk: $([ "$playgo" -eq 1 ] && echo yes || echo no)"
+  echo "fakelib/libSceAmpr.sprx: $([ -f "$src/fakelib/libSceAmpr.sprx" ] && echo present || echo missing)"
+  echo "fakelib/libScePlayGo.sprx: $([ -f "$src/fakelib/libScePlayGo.sprx" ] && echo present || echo missing)"
+  echo "ampr_emu.index: $([ -f "$src/ampr_emu.index" ] && echo present || echo missing)"
+  if [ "$playgo" -eq 1 ]; then
+    echo "assessment: APR/AMPR likely needed (playgo chunk found)"
+  elif [ -f "$src/fakelib/libSceAmpr.sprx" ] || [ -f "$src/ampr_emu.index" ]; then
+    echo "assessment: AMPR support already appears staged"
+  else
+    echo "assessment: no automatic APR marker found"
+  fi
+}
+
+ampr_index() {
+  local src="${1:?ampr-index needs app folder}"
+  [ -d "$src" ] || { echo "not a folder: $src" >&2; exit 1; }
+  python3 - "$src" <<'PY'
+import os, struct, sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve()
+need = [root / "fakelib" / "libSceAmpr.sprx", root / "fakelib" / "libScePlayGo.sprx"]
+missing = [p.name for p in need if not p.exists()]
+if missing:
+    print("AMPR index not built; missing:", ", ".join(missing))
+    raise SystemExit(2)
+output = root / "ampr_emu.index"
+tmp = output.with_suffix(output.suffix + ".tmp")
+def key(p: str) -> str:
+    return p.replace("\\", "/").lower()
+def fnv(p: str) -> int:
+    h = 1469598103934665603
+    for ch in key(p):
+        h ^= ord(ch)
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return h or 1
+def slots(rows):
+    n = 2
+    while n < len(rows) * 2:
+        n <<= 1
+    table = [(0, 0, 0)] * n
+    mask = n - 1
+    for i, (_, _, path) in enumerate(rows):
+        h = fnv(path)
+        pos = h & mask
+        while table[pos][1] != 0:
+            if table[pos][0] == h:
+                oh, oi, flags = table[pos]
+                table[pos] = (oh, oi, flags | 1)
+            pos = (pos + 1) & mask
+        table[pos] = (h, i + 1, 0)
+    return table
+skip = {key("/app0/ampr_emu.index"), key("/app0/ampr_emu.index.tmp")}
+seen = set()
+rows = []
+out_r = output.resolve()
+tmp_r = tmp.resolve()
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames.sort(key=str.lower)
+    filenames.sort(key=str.lower)
+    for name in filenames:
+        p = Path(dirpath) / name
+        try:
+            if not p.is_file():
+                continue
+            rp = p.resolve()
+            if rp in (out_r, tmp_r):
+                continue
+            ipath = "/app0/" + p.relative_to(root).as_posix()
+            ikey = key(ipath)
+            if ikey in skip or ikey in seen:
+                continue
+            seen.add(ikey)
+            st = p.stat()
+            rows.append((st.st_size, int(st.st_mtime), ipath))
+        except Exception as exc:
+            print(f"skip {p}: {exc}")
+rows.sort(key=lambda r: key(r[2]))
+rec_s = struct.Struct("<IIQq")
+slt_s = struct.Struct("<QII")
+hdr_s = struct.Struct("<8sIIQQQII")
+blob = bytearray()
+recs = bytearray()
+for size, mtime, path in rows:
+    enc = path.encode("utf-8") + b"\0"
+    recs += rec_s.pack(len(blob), len(enc) - 1, size, mtime)
+    blob += enc
+table = slots(rows)
+p_end = hdr_s.size + len(recs) + len(blob)
+h_off = (p_end + (slt_s.size - 1)) & ~(slt_s.size - 1)
+with tmp.open("wb") as f:
+    f.write(hdr_s.pack(b"AMPRIDX3", 3, rec_s.size, len(rows), len(blob), h_off, slt_s.size, len(table)))
+    f.write(recs)
+    f.write(blob)
+    f.write(b"\0" * (h_off - p_end))
+    for h, ip1, flags in table:
+        f.write(slt_s.pack(h, ip1, flags))
+tmp.replace(output)
+print(f"built {output} ({len(rows):,} files)")
+PY
+}
+
+preflight() {
+  local src="${1:?preflight needs app folder}"
+  [ -d "$src" ] || { echo "not a folder: $src" >&2; exit 1; }
+  local title src_kb free_kb
+  title="$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')"
+  src_kb="$(du -sk "$src" | cut -f1)"
+  free_kb="$(df -k --output=avail "$SCRATCH" | tail -1 | tr -d ' ')"
+  echo "=== preflight: ${title:-unknown} ==="
+  echo "source: $src"
+  echo "source size: $((src_kb/1024/1024))G"
+  echo "local free:  $((free_kb/1024/1024))G"
+  echo "legacy peak extra need: ~$((src_kb*2/1024/1024))G"
+  if mountpoint -q "$SSD"; then
+    echo "SSD: $(df -h "$SSD" | tail -1)"
+  else
+    echo "SSD: not mounted"
+  fi
+  echo
+  apr_check "$src" || true
+  echo
+  compat_lookup "${title:-$src}" || true
+  echo
+  echo "recommendation: mode=auto level=1 (MkPFS 0.0.9 fused first; fallback legacy if needed)"
+}
+
+history_list() {
+  if [ ! -f "$HISTORY" ]; then
+    echo "no history yet: $HISTORY"
+    return
+  fi
+  python3 - "$HISTORY" <<'PY'
+import json, sys
+from pathlib import Path
+rows=[]
+for line in Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines():
+    try:
+        rows.append(json.loads(line))
+    except Exception:
+        pass
+for r in rows[-30:]:
+    title=r.get("title") or r.get("file") or "?"
+    event=r.get("event","?")
+    ts=r.get("ts","")
+    out=r.get("output") or r.get("dst") or ""
+    size=r.get("output_bytes") or r.get("bytes")
+    size_s=f"{size/1024**3:.1f}G" if isinstance(size, int) else "-"
+    extra=r.get("layout") or r.get("mode") or ""
+    print(f"{ts}  {event:5}  {title:10}  {size_s:>7}  {extra}  {out}")
+PY
+}
+
+record_copy_history() {
+  local title="$1" src="$2" dst="$3"
+  python3 - "$HISTORY" "$title" "$src" "$dst" <<'PY'
+import json, os, sys, time
+hist, title, src, dst = sys.argv[1:]
+row = {
+    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "event": "copy",
+    "title": title,
+    "src": src,
+    "dst": dst,
+    "bytes": os.path.getsize(dst) if os.path.exists(dst) else None,
+}
+os.makedirs(os.path.dirname(hist), exist_ok=True)
+with open(hist, "a", encoding="utf-8") as f:
+    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+PY
+}
+
+copy_to_ssd() {
+  require_ssd
+  local src="${1:?copy needs PPSA title or file path}"
+  if [[ "$src" != /* ]]; then
+    src="$OUT/${src%.ffpfsc}.ffpfsc"
+  fi
+  [ -f "$src" ] || { echo "not found: $src" >&2; exit 1; }
+  local dst="$SSD_HOME/$(basename "$src")"
+  echo "copying $(ls -lh "$src" | awk '{print $5, $9}') -> $dst"
+  cp "$src" "$dst"
+  sync
+  echo "src bytes: $(stat -c %s "$src")"
+  echo "dst bytes: $(stat -c %s "$dst")"
+  record_copy_history "$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')" "$src" "$dst"
+  df -h "$SSD" | tail -1
+}
+
+ssd_status() {
+  require_ssd
+  df -h "$SSD" | tail -1
+  ls -lh "$SSD_HOME"
+}
+
+ssd_rm() {
+  require_ssd
+  [ "$#" -gt 0 ] || { echo "ssd-rm needs at least one title" >&2; exit 1; }
+  for title in "$@"; do
+    local path="$SSD_HOME/${title%.ffpfsc}.ffpfsc"
+    if [ -f "$path" ]; then
+      rm -f "$path"
+      echo "deleted $path"
+    else
+      echo "missing $path"
+    fi
+  done
+  sync
+  df -h "$SSD" | tail -1
+}
+
+clean_ssd() {
+  require_ssd
+  find "$SSD_HOME" \( -name '._*' -o -name '.DS_Store' -o -name '.Spotlight-V100' -o -name '.fseventsd' -o -name '.Trashes' \) -print -exec rm -rf {} + 2>/dev/null
+  sync
+  ls -lh "$SSD_HOME"
+}
+
+extract_archive() {
+  local archive="${1:?extract needs archive path}"
+  [ -f "$archive" ] || { echo "not a file: $archive" >&2; exit 1; }
+  mkdir -p "$SCRATCH"
+  local stem
+  stem="$(basename "$archive")"
+  stem="${stem%.*}"
+  local dest="$SCRATCH/extract-$stem"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  case "${archive,,}" in
+    *.zip|*.7z|*.rar|*.r00|*.part1.rar)
+      7z x -y "-o$dest" "$archive"
+      ;;
+    *)
+      echo "unsupported archive: $archive" >&2
+      exit 1
+      ;;
+  esac
+  echo "extracted to $dest"
+  echo "candidate app roots:"
+  find "$dest" -maxdepth 6 -type d -name '*-app' | sort
+}
+
+build_one() {
+  local src="${1:?build needs app folder}"
+  local level="${2:-1}"
+  local mode="${3:-auto}"
+  [ -d "$src" ] || { echo "not a folder: $src" >&2; exit 1; }
+  local title
+  title="$(title_from_arg "$src" | tr '[:lower:]' '[:upper:]')"
+  echo "=== build front door: ${title:-unknown} ==="
+  preflight "$src"
+  echo
+  echo "=== AMPR index refresh (only if SPRX files are present) ==="
+  ampr_index "$src" || true
+  echo
+  echo "=== pack ==="
+  local log="$ROOT/logs/build_${title:-manual}_$(date +%Y%m%d_%H%M%S).log"
+  mkdir -p "$ROOT/logs"
+  if bash "$PACK_SCRIPT" "$src" "$level" auto "$mode" | tee "$log"; then
+    echo "build ok; log=$log"
+    return 0
+  fi
+  if [ "$mode" = "auto" ] || [ "$mode" = "fused" ]; then
+    echo "fused/auto build failed; retrying legacy two-pass"
+    bash "$PACK_SCRIPT" "$src" "$level" auto legacy | tee -a "$log"
+    echo "legacy retry done; log=$log"
+  else
+    echo "build failed; log=$log" >&2
+    return 1
+  fi
+}
+
+build_batch() {
+  local root="${1:?build-batch needs a folder}"
+  local level="${2:-1}"
+  local mode="${3:-auto}"
+  [ -d "$root" ] || { echo "not a folder: $root" >&2; exit 1; }
+  mapfile -t apps < <(find "$root" -maxdepth 6 -type d -name '*-app' | sort)
+  if [ "${#apps[@]}" -eq 0 ]; then
+    echo "no *-app folders found under $root"
+    exit 1
+  fi
+  echo "found ${#apps[@]} app folder(s)"
+  local ok=0 fail=0
+  for app in "${apps[@]}"; do
+    echo
+    echo "=== batch item: $app ==="
+    if build_one "$app" "$level" "$mode"; then
+      ok=$((ok+1))
+    else
+      fail=$((fail+1))
+    fi
+  done
+  echo "batch complete: ok=$ok fail=$fail"
+  [ "$fail" -eq 0 ]
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  scan) scan "$@" ;;
+  status) status "$@" ;;
+  inspect) inspect_container "$@" ;;
+  compat) compat_lookup "$@" ;;
+  compat-submit) compat_submit "$@" ;;
+  apr-check) apr_check "$@" ;;
+  ampr-index) ampr_index "$@" ;;
+  preflight) preflight "$@" ;;
+  build) build_one "$@" ;;
+  build-batch) build_batch "$@" ;;
+  history) history_list "$@" ;;
+  copy) copy_to_ssd "$@" ;;
+  ssd) ssd_status "$@" ;;
+  ssd-rm) ssd_rm "$@" ;;
+  clean-ssd) clean_ssd "$@" ;;
+  extract) extract_archive "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) echo "unknown command: $cmd" >&2; usage; exit 1 ;;
+esac
